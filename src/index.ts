@@ -19,7 +19,14 @@ type HonoEnv = { Bindings: Env }
 
 const app = new Hono<HonoEnv>()
 
-app.use('*', cors())
+// AAuth-specific response headers must be explicitly exposed so
+// cross-origin JS clients (playground.aauth.dev and other demo agents
+// running in a browser) can read them. Without this, fetch() drops
+// AAuth-Requirement from the 401 response and the agent never sees
+// the resource_token it needs to exchange at the PS.
+app.use('*', cors({
+  exposeHeaders: ['AAuth-Requirement', 'Accept-Signature', 'Signature-Error'],
+}))
 
 // Identity scopes the PS can release — passed through on resource_token.scope.
 const PS_IDENTITY_SCOPES: Set<string> = new Set([
