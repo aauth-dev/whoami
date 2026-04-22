@@ -1,0 +1,11 @@
+name = "whoami-aauth-dev"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ORIGIN = "https://whoami.aauth.dev"
+
+[[routes]]
+pattern = "whoami.aauth.dev"
+custom_domain = true

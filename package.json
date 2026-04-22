@@ -1,0 +1,25 @@
+{
+  "name": "whoami.aauth.dev",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AAuth Who Am I - identity claims resource server",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "generate-key": "node scripts/generate-key.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:deploy": "bash scripts/test.sh"
+  },
+  "dependencies": {
+    "@hellocoop/httpsig": "^1.4.0",
+    "hono": "^4.7.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250410.0",
+    "@vitest/coverage-v8": "^4.1.4",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.4",
+    "wrangler": "^4.0.0"
+  }
+}
