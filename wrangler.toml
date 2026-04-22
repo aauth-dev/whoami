@@ -3,6 +3,9 @@ main = "src/index.ts"
 compatibility_date = "2025-04-01"
 compatibility_flags = ["nodejs_compat"]
 
+[assets]
+directory = "public"
+
 [vars]
 ORIGIN = "https://whoami.aauth.dev"
 

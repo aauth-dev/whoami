@@ -45,6 +45,7 @@ app.get('/.well-known/aauth-resource.json', (c) => {
     issuer: origin,
     jwks_uri: `${origin}/.well-known/jwks.json`,
     client_name: 'AAuth Who Am I',
+    logo_uri: `${origin}/logo.png`,
     scope_descriptions: {
       whoami: 'Access your identity claims',
     },
