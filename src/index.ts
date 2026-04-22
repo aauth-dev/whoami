@@ -227,6 +227,16 @@ async function handleAgentToken(
     return c.json({ error: 'agent_token expired' }, 401)
   }
 
+  // If no scope requested, return the agent's own identity directly
+  const scopeParam = c.req.query('scope') || ''
+  const requestedScopes = scopeParam.trim().split(/\s+/).filter(Boolean)
+
+  if (requestedScopes.length === 0) {
+    const identity: Record<string, unknown> = { sub: payload.sub }
+    if (payload.ps) identity.ps = payload.ps
+    return c.json(identity)
+  }
+
   // PS URL from agent_token's ps claim
   const psUrl = payload.ps as string | undefined
   if (!psUrl) return c.json({ error: 'agent_token missing ps claim' }, 400)
@@ -244,8 +254,6 @@ async function handleAgentToken(
   }
 
   // Build scope: always "whoami" + requested identity scopes from ?scope=
-  const scopeParam = c.req.query('scope') || ''
-  const requestedScopes = scopeParam.trim().split(/\s+/).filter(Boolean)
   const unknown = requestedScopes.filter((s) => !PS_IDENTITY_SCOPES.has(s))
   if (unknown.length > 0) {
     return c.json({ error: 'invalid_scope', unknown }, 400)
