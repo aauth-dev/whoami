@@ -34,7 +34,14 @@ export async function getPublicJWK(jwkJson: string): Promise<JsonWebKey & { kid:
 }
 
 export async function computeJwkThumbprint(jwk: JsonWebKey): Promise<string> {
-  const thumbprintInput = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x })
+  // RFC 7638: required members in lexicographic order, per key type
+  let thumbprintInput: string
+  if (jwk.kty === 'EC') {
+    thumbprintInput = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y })
+  } else {
+    // OKP (Ed25519) — only crv, kty, x
+    thumbprintInput = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x })
+  }
   const hash = await crypto.subtle.digest('SHA-256', textEncoder.encode(thumbprintInput))
   return base64urlEncode(new Uint8Array(hash))
 }
