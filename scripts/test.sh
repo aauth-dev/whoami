@@ -2,7 +2,7 @@
 # Smoke tests for whoami.aauth.dev deployment
 # Usage: bash scripts/test.sh [base_url]
 
-set -euo pipefail
+set -uo pipefail
 
 BASE="${1:-https://whoami.aauth.dev}"
 PASS=0
@@ -13,10 +13,10 @@ check() {
   local ok="$2"
   if [ "$ok" = "true" ]; then
     echo "  PASS  $desc"
-    ((PASS++))
+    PASS=$((PASS + 1))
   else
     echo "  FAIL  $desc"
-    ((FAIL++))
+    FAIL=$((FAIL + 1))
   fi
 }
 
