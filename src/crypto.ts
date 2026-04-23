@@ -25,15 +25,16 @@ export async function importSigningKey(jwkJson: string): Promise<CryptoKey> {
   return crypto.subtle.importKey('jwk', jwk, { name: 'Ed25519' }, false, ['sign'])
 }
 
+import { calculateThumbprint } from '@hellocoop/httpsig'
+export { calculateThumbprint as computeJwkThumbprint }
+
 export async function getPublicJWK(jwkJson: string): Promise<JsonWebKey & { kid: string }> {
   const jwk = JSON.parse(jwkJson)
   const { d: _d, key_ops: _ops, ext: _ext, ...rest } = jwk
   const publicJwk = { ...rest, key_ops: ['verify'] }
-  const kid = await computeJwkThumbprint(publicJwk)
+  const kid = await calculateThumbprint(publicJwk)
   return { ...publicJwk, kid }
 }
-
-export { calculateThumbprint as computeJwkThumbprint } from '@hellocoop/httpsig'
 
 export async function signJWT(
   header: Record<string, string>,
