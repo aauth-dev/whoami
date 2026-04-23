@@ -12,7 +12,7 @@
     "test:deploy": "bash scripts/test.sh"
   },
   "dependencies": {
-    "@hellocoop/httpsig": "^1.4.0",
+    "@hellocoop/httpsig": "^1.5.0",
     "hono": "^4.7.0"
   },
   "devDependencies": {
