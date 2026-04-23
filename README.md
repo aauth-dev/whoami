@@ -1,6 +1,12 @@
-# Who Am I — AAuth Identity Resource
+# whoami — AAuth Identity Resource
 
-A reference resource server demonstrating [AAuth](https://github.com/DickHardt/AAuth) identity claim release. Agents present an `agent_token`, receive a `resource_token` pointing at their Person Server, and come back with an `auth_token` that unlocks the caller's identity claims.
+Part of [AAuth](https://aauth.dev). Live at [whoami.aauth.dev](https://whoami.aauth.dev).
+
+A reference resource server demonstrating [AAuth](https://github.com/dickhardt/AAuth) identity claim release. Agents present an `agent_token`, receive a `resource_token` pointing at their Person Server, and come back with an `auth_token` that unlocks the caller's identity claims.
+
+## Try it
+
+Drive the full flow in the [AAuth Playground](https://playground.aauth.dev) — it handles agent signing, the PS interaction, and consent. Pick the whoami tab after bootstrapping an agent.
 
 ## Live endpoints
 
@@ -30,7 +36,7 @@ The resource verifies the auth token against the issuer's JWKS, checks `aud`, `e
 
 ## Scopes
 
-The `whoami` scope is always included on the resource token. Additional identity scopes can be requested via the `?scope=` query parameter — they're validated against the supported set and passed through on `resource_token.scope`:
+The `whoami` scope is always included on the resource token. Additional identity scopes can be requested via the `?scope=` query parameter and are passed through on `resource_token.scope`. The supported set combines standard OIDC scopes with Hellō identity attributes:
 
 ```
 openid profile name nickname given_name family_name preferred_username
