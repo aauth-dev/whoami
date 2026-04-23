@@ -47,7 +47,7 @@ app.get('/.well-known/aauth-resource.json', (c) => {
     client_name: 'AAuth Who Am I',
     logo_uri: `${origin}/logo.png`,
     scope_descriptions: {
-      whoami: 'Access your identity claims',
+      whoami: 'Read your identity claims',
     },
   })
 })
