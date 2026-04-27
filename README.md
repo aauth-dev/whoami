@@ -1,6 +1,6 @@
 # whoami — AAuth Identity Resource
 
-Part of [AAuth](https://aauth.dev). Live at [whoami.aauth.dev](https://whoami.aauth.dev).
+Part of [AAuth](https://aauth.dev). Live at [whoami.aauth.dev](https://whoami.aauth.dev/.well-known/aauth-resource.json).
 
 A reference resource server demonstrating [AAuth](https://github.com/dickhardt/AAuth) identity claim release. Agents present an `agent_token`, receive a `resource_token` pointing at their Person Server, and come back with an `auth_token` that unlocks the caller's identity claims.
 
