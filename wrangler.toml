@@ -12,3 +12,7 @@ ORIGIN = "https://whoami.aauth.dev"
 [[routes]]
 pattern = "whoami.aauth.dev"
 custom_domain = true
+
+[[queues.producers]]
+queue = "aauth-events"
+binding = "EVENTS_QUEUE"

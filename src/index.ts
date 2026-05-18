@@ -13,11 +13,30 @@ import {
   computeJwkThumbprint,
   verifyJWT,
 } from './crypto'
+import { emit, emitVerifyFailed } from './events'
 import type { Env } from './types'
 
 type HonoEnv = { Bindings: Env }
 
 const app = new Hono<HonoEnv>()
+
+// Catch every unhandled exception, emit a structured error event with
+// a stack trace, and return a clean 500. Without this, unprotected
+// crypto and KV calls bubble to Hono's default 500 with no context.
+app.onError((err, c) => {
+  const error = err instanceof Error ? err : new Error(String(err))
+  emit(c, {
+    event: 'aauth.unhandled_error',
+    level: 50,
+    msg: error.message,
+    route: new URL(c.req.url).pathname,
+    method: c.req.method,
+    error_name: error.name,
+    error_message: error.message,
+    error_stack: error.stack,
+  })
+  return c.json({ error: 'internal error' }, 500)
+})
 
 // AAuth-specific response headers must be explicitly exposed so
 // cross-origin JS clients (playground.aauth.dev and other demo agents
@@ -92,6 +111,7 @@ app.get('/', async (c) => {
         components: ['@method', '@authority', '@path', 'signature-key'],
         sigkey: 'jkt',
       })
+      emitVerifyFailed(c, 'no_signature')
       return c.json(
         { error: 'signature_required' },
         { status: 401, headers: { 'Accept-Signature': acceptSig } },
@@ -103,6 +123,10 @@ app.get('/', async (c) => {
     if (sigResult.signatureError) {
       headers['Signature-Error'] = generateSignatureErrorHeader(sigResult.signatureError)
     }
+    emitVerifyFailed(c, 'signature_invalid', {
+      detail: sigResult.error,
+      signature_error_code: sigResult.signatureError?.error,
+    })
     return c.json(
       { error: 'signature_verification_failed', detail: sigResult.error },
       { status: 401, headers },
@@ -111,6 +135,7 @@ app.get('/', async (c) => {
 
   // Must be JWT key type
   if (sigResult.keyType !== 'jwt' || !sigResult.jwt) {
+    emitVerifyFailed(c, 'wrong_key_scheme', { actual_key_type: sigResult.keyType })
     return c.json({ error: 'Signature-Key must use sig=jwt scheme' }, 401)
   }
 
@@ -120,23 +145,25 @@ app.get('/', async (c) => {
 
   // ── auth_token → verify and return identity claims ──
   if (jwtHeader.typ === 'aa-auth+jwt') {
-    return handleAuthToken(c, jwtRaw, jwtPayload)
+    return handleAuthToken(c, jwtRaw, jwtPayload, sigResult.thumbprint)
   }
 
   // ── agent_token → mint resource token, return 401 ──
   if (jwtHeader.typ === 'aa-agent+jwt') {
-    return handleAgentToken(c, jwtRaw, jwtPayload)
+    return handleAgentToken(c, jwtRaw, jwtPayload, sigResult.thumbprint)
   }
 
+  emitVerifyFailed(c, 'unsupported_jwt_type', { jwt_typ: jwtHeader.typ })
   return c.json({ error: `unsupported JWT type: ${jwtHeader.typ}` }, 400)
 })
 
 // ── Auth token handler ──
 
 async function handleAuthToken(
-  c: { env: Env; json: Function; req: { url: string } },
+  c: import('hono').Context<HonoEnv>,
   jwtRaw: string,
   payload: Record<string, unknown>,
+  callerJkt: string,
 ) {
   // Verify JWT against issuer's JWKS (the Person Server)
   const iss = payload.iss as string | undefined
@@ -160,22 +187,37 @@ async function handleAuthToken(
   try {
     await verifyJWT(jwtRaw, jwks)
   } catch (err) {
+    emitVerifyFailed(c, 'auth_token_jwt_verify_failed', {
+      iss,
+      detail: (err as Error).message,
+    })
     return c.json({ error: `auth_token verification failed: ${(err as Error).message}` }, 401)
   }
 
   const origin = c.env.ORIGIN
   if (payload.aud !== origin) {
+    emitVerifyFailed(c, 'auth_token_aud_mismatch', {
+      iss,
+      aud_actual: payload.aud,
+      aud_expected: origin,
+    })
     return c.json({ error: 'auth_token aud mismatch' }, 401)
   }
 
   const now = Math.floor(Date.now() / 1000)
   if (!payload.exp || (payload.exp as number) < now) {
+    emitVerifyFailed(c, 'auth_token_expired', { iss, exp: payload.exp })
     return c.json({ error: 'auth_token expired' }, 401)
   }
 
   const scopeStr = typeof payload.scope === 'string' ? payload.scope : ''
   const scopes = scopeStr.split(/\s+/).filter(Boolean)
   if (!scopes.includes('whoami')) {
+    emitVerifyFailed(c, 'insufficient_scope', {
+      iss,
+      required: 'whoami',
+      granted: scopes,
+    })
     return c.json({ error: 'insufficient_scope', required: 'whoami', granted: scopes }, 403)
   }
 
@@ -188,15 +230,25 @@ async function handleAuthToken(
     }
   }
 
+  emit(c, {
+    event: 'aauth.whoami.auth_verified',
+    msg: 'auth_token verified',
+    iss,
+    agent_sub: payload.sub,
+    scope: scopeStr,
+    jkt: callerJkt,
+  })
+
   return c.json(claims)
 }
 
 // ── Agent token handler ──
 
 async function handleAgentToken(
-  c: { env: Env; json: Function; req: { url: string; query: (k: string) => string | undefined } },
+  c: import('hono').Context<HonoEnv>,
   jwtRaw: string,
   payload: Record<string, unknown>,
+  callerJkt: string,
 ) {
   // Verify agent_token against its issuer's JWKS (the agent server)
   const agentIss = payload.iss as string | undefined
@@ -220,11 +272,16 @@ async function handleAgentToken(
   try {
     await verifyJWT(jwtRaw, jwks)
   } catch (err) {
+    emitVerifyFailed(c, 'agent_token_jwt_verify_failed', {
+      iss: agentIss,
+      detail: (err as Error).message,
+    })
     return c.json({ error: `agent_token verification failed: ${(err as Error).message}` }, 401)
   }
 
   const now = Math.floor(Date.now() / 1000)
   if (!payload.exp || (payload.exp as number) < now) {
+    emitVerifyFailed(c, 'agent_token_expired', { iss: agentIss, exp: payload.exp })
     return c.json({ error: 'agent_token expired' }, 401)
   }
 
@@ -235,6 +292,13 @@ async function handleAgentToken(
   if (requestedScopes.length === 0) {
     const identity: Record<string, unknown> = { sub: payload.sub }
     if (payload.ps) identity.ps = payload.ps
+    emit(c, {
+      event: 'aauth.whoami.agent_identity_returned',
+      msg: 'agent_token verified; no scopes requested, returning identity',
+      agent_sub: payload.sub,
+      agent_jkt: callerJkt,
+      ps: payload.ps,
+    })
     return c.json(identity)
   }
 
@@ -283,6 +347,17 @@ async function handleAgentToken(
   }
 
   const resourceToken = await signJWT(rtHeader, rtPayload, privateKey)
+
+  emit(c, {
+    event: 'aauth.whoami.resource_token_minted',
+    msg: 'resource_token minted for agent',
+    agent_sub: payload.sub,
+    agent_jkt: agentJkt,
+    caller_jkt: callerJkt,
+    granted_scope: scopeString,
+    requested_scope: requestedScopes.join(' '),
+    ps_issuer: psIssuer,
+  })
 
   return c.json(
     { error: 'auth_token_required' },
