@@ -63,7 +63,7 @@ app.get('/.well-known/aauth-resource.json', (c) => {
   return c.json({
     issuer: origin,
     jwks_uri: `${origin}/.well-known/jwks.json`,
-    client_name: 'AAuth Who Am I',
+    name: 'AAuth Who Am I',
     description:
       'Echoes back the identity claims a resource sees from your AAuth credentials — a minimal resource for testing identity-based access.',
     logo_uri: `${origin}/logo.png`,
