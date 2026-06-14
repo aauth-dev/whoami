@@ -1,0 +1,337 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AAuth Who Am I",
+    "version": "1.0",
+    "description": "A minimal AAuth resource server that echoes back the identity claims a resource sees from the caller's AAuth credentials. Useful for testing identity-based access.\n\n## Authentication flow\n\n`GET /` has three outcomes depending on what the caller presents:\n\n1. **No HTTP signature** → `401` with `Accept-Signature` header describing the required signature scheme.\n2. **`aa-agent+jwt` in `Signature-Key`** → `401` with `AAuth-Requirement` header containing a freshly-minted `resource_token` the agent can exchange at its Person Server (PS) for an `auth_token`. Add `?scope=` to request identity claims beyond the default agent identity.\n3. **`aa-auth+jwt` in `Signature-Key`** → `200` with identity claims as JSON."
+  },
+  "servers": [
+    {
+      "url": "https://whoami.aauth.dev",
+      "description": "Production"
+    }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "operationId": "whoami",
+        "summary": "Return identity claims (or initiate AAuth flow)",
+        "description": "Verifies the HTTP signature on the request and responds based on the JWT type presented in the `Signature-Key` header:\n\n- No signature → `401` + `Accept-Signature`\n- `aa-agent+jwt`, no `?scope=` → `200` with agent's own `sub` (and `ps` if present)\n- `aa-agent+jwt`, with `?scope=` → `401` + `AAuth-Requirement` (resource token minted)\n- `aa-auth+jwt` with `whoami` scope → `200` with identity claims\n\nAll requests must carry an HTTP Message Signature over `@method`, `@authority`, `@path`, and `signature-key` using the `jkt` key scheme.",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "description": "Space-separated list of identity scopes to include in the minted `resource_token` (e.g. `email profile`). Only valid when presenting an `aa-agent+jwt`. The `whoami` scope is always included automatically.",
+            "schema": {
+              "type": "string",
+              "example": "email profile"
+            }
+          }
+        ],
+        "security": [
+          {
+            "httpSignature": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Identity claims echoed back. Content depends on the JWT type presented:\n- `aa-auth+jwt`: identity claims from the Person Server (all non-infrastructure claims)\n- `aa-agent+jwt` with no `?scope=`: agent's own `sub` and optionally `ps`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "$ref": "#/components/schemas/IdentityClaims" },
+                    { "$ref": "#/components/schemas/AgentIdentity" }
+                  ]
+                },
+                "examples": {
+                  "authTokenClaims": {
+                    "summary": "Identity claims from auth_token",
+                    "value": {
+                      "sub": "https://person.example/.well-known/aauth-person.json#abc123",
+                      "email": "alice@example.com",
+                      "name": "Alice Example"
+                    }
+                  },
+                  "agentIdentity": {
+                    "summary": "Agent identity (no scope requested)",
+                    "value": {
+                      "sub": "https://agent.example",
+                      "ps": "https://person.example"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — invalid scope or missing required JWT claim",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "examples": {
+                  "invalidScope": {
+                    "summary": "Unknown scope",
+                    "value": { "error": "invalid_scope", "unknown": ["badscope"] }
+                  },
+                  "missingClaim": {
+                    "summary": "Missing required claim",
+                    "value": { "error": "agent_token missing ps claim" }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Signature missing, verification failed, or an `auth_token` is required. Inspect the response headers to determine next steps:\n- `Accept-Signature` present → sign your request and retry\n- `Signature-Error` present → your signature was malformed\n- `AAuth-Requirement` present → exchange the `resource-token` at your PS",
+            "headers": {
+              "Accept-Signature": {
+                "description": "Describes the HTTP signature scheme required. Present when no signature was found on the request.",
+                "schema": {
+                  "type": "string",
+                  "example": "sig=(); keyid=\"jkt\"; covered-components=\"@method @authority @path signature-key\""
+                }
+              },
+              "AAuth-Requirement": {
+                "description": "Contains a freshly-minted `resource_token` the agent exchanges at its Person Server to obtain an `auth_token`. Present when an `aa-agent+jwt` was verified and scopes were requested.",
+                "schema": {
+                  "type": "string",
+                  "example": "requirement=auth-token; resource-token=\"eyJ...\""
+                }
+              },
+              "Signature-Error": {
+                "description": "Describes why HTTP signature verification failed. Present when a signature was present but could not be verified.",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "examples": {
+                  "signatureRequired": {
+                    "summary": "No signature found",
+                    "value": { "error": "signature_required" }
+                  },
+                  "signatureFailed": {
+                    "summary": "Signature verification failed",
+                    "value": { "error": "signature_verification_failed", "detail": "signature component mismatch" }
+                  },
+                  "authTokenRequired": {
+                    "summary": "Resource token minted — exchange at PS",
+                    "value": { "error": "auth_token_required" }
+                  },
+                  "authTokenExpired": {
+                    "summary": "Presented auth_token is expired",
+                    "value": { "error": "auth_token expired" }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but missing the required `whoami` scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/Error" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "required": { "type": "string" },
+                        "granted": { "type": "array", "items": { "type": "string" } }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "error": "insufficient_scope",
+                  "required": "whoami",
+                  "granted": ["openid"]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "internal error" }
+              }
+            }
+          },
+          "502": {
+            "description": "Could not reach issuer or Person Server",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "examples": {
+                  "issuerUnreachable": {
+                    "summary": "Cannot reach issuer",
+                    "value": { "error": "Cannot reach issuer: fetch failed" }
+                  },
+                  "psUnreachable": {
+                    "summary": "Cannot reach Person Server",
+                    "value": { "error": "Cannot reach PS: fetch failed" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/aauth-resource.json": {
+      "get": {
+        "operationId": "getResourceMetadata",
+        "summary": "AAuth resource server metadata",
+        "description": "Returns metadata about this resource server in the AAuth Resource Server Metadata format. Agents discover this document to learn the resource's identity, available scopes, JWKS URI, and supported R3 vocabularies.",
+        "responses": {
+          "200": {
+            "description": "Resource server metadata",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ResourceMetadata" },
+                "example": {
+                  "issuer": "https://whoami.aauth.dev",
+                  "jwks_uri": "https://whoami.aauth.dev/.well-known/jwks.json",
+                  "client_name": "AAuth Who Am I",
+                  "description": "Echoes back the identity claims a resource sees from your AAuth credentials — a minimal resource for testing identity-based access.",
+                  "logo_uri": "https://whoami.aauth.dev/logo.png",
+                  "scope_descriptions": {
+                    "whoami": "Echo your provided identity claims"
+                  },
+                  "r3_vocabularies": {
+                    "urn:aauth:vocabulary:openapi": "https://whoami.aauth.dev/openapi.json"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/jwks.json": {
+      "get": {
+        "operationId": "getJWKS",
+        "summary": "JSON Web Key Set",
+        "description": "Returns the public key(s) used by this resource server to sign `resource_token` JWTs (`aa-resource+jwt`). Person Servers use this to verify resource tokens they receive.",
+        "responses": {
+          "200": {
+            "description": "JWKS with the resource server's public key(s)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/JWKS" },
+                "example": {
+                  "keys": [
+                    {
+                      "kty": "OKP",
+                      "crv": "Ed25519",
+                      "x": "base64url-encoded-public-key",
+                      "kid": "key-id"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "httpSignature": {
+        "type": "http",
+        "scheme": "signature",
+        "description": "HTTP Message Signatures (RFC 9421). The request must carry:\n- A `Signature` header with label `sig`\n- A `Signature-Input` header referencing `@method`, `@authority`, `@path`, and `signature-key`\n- A `Signature-Key` header containing either an `aa-agent+jwt` or `aa-auth+jwt` compact JWT, using the `jwt=` scheme"
+      }
+    },
+    "schemas": {
+      "IdentityClaims": {
+        "type": "object",
+        "description": "Identity claims from the Person Server, after stripping JWT infrastructure claims (`iss`, `aud`, `exp`, `iat`, `jti`, `cnf`, `dwk`, `act`, `scope`). The exact set of properties depends on which scopes were granted.",
+        "additionalProperties": true,
+        "properties": {
+          "sub": {
+            "type": "string",
+            "description": "Subject identifier (person's stable ID at the PS)",
+            "example": "https://person.example/.well-known/aauth-person.json#abc123"
+          },
+          "email": { "type": "string", "example": "alice@example.com" },
+          "name": { "type": "string", "example": "Alice Example" },
+          "picture": { "type": "string", "format": "uri" }
+        }
+      },
+      "AgentIdentity": {
+        "type": "object",
+        "description": "Agent's own identity, returned when an `aa-agent+jwt` is verified but no `?scope=` was requested.",
+        "required": ["sub"],
+        "properties": {
+          "sub": {
+            "type": "string",
+            "description": "Agent subject identifier",
+            "example": "https://agent.example"
+          },
+          "ps": {
+            "type": "string",
+            "format": "uri",
+            "description": "URL of the agent's Person Server (if present in agent_token)",
+            "example": "https://person.example"
+          }
+        }
+      },
+      "ResourceMetadata": {
+        "type": "object",
+        "required": ["issuer", "jwks_uri"],
+        "properties": {
+          "issuer": { "type": "string", "format": "uri" },
+          "jwks_uri": { "type": "string", "format": "uri" },
+          "client_name": { "type": "string" },
+          "description": { "type": "string" },
+          "logo_uri": { "type": "string", "format": "uri" },
+          "scope_descriptions": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "r3_vocabularies": {
+            "type": "object",
+            "description": "Maps R3 vocabulary URIs to their discovery endpoints.",
+            "additionalProperties": { "type": "string", "format": "uri" }
+          }
+        }
+      },
+      "JWKS": {
+        "type": "object",
+        "required": ["keys"],
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A JSON Web Key (JWK)",
+              "additionalProperties": true,
+              "required": ["kty"],
+              "properties": {
+                "kty": { "type": "string", "example": "OKP" },
+                "crv": { "type": "string", "example": "Ed25519" },
+                "x": { "type": "string" },
+                "kid": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string" },
+          "detail": { "type": "string" }
+        }
+      }
+    }
+  }
+}

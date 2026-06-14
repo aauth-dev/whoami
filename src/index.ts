@@ -70,6 +70,9 @@ app.get('/.well-known/aauth-resource.json', (c) => {
     scope_descriptions: {
       whoami: 'Echo your provided identity claims',
     },
+    r3_vocabularies: {
+      'urn:aauth:vocabulary:openapi': `${origin}/openapi.json`,
+    },
   })
 })
 
