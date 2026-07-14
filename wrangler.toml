@@ -3,6 +3,11 @@ main = "src/index.ts"
 compatibility_date = "2025-04-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Opt in to the account-level Workers Trace Events Logpush job (forensic
+# archive: R2 bucket cloudflare-managed-3941311c, WEUR). Per-worker opt-in
+# is required — without this the account job ignores the worker.
+logpush = true
+
 [assets]
 directory = "public"
 
