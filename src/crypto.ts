@@ -31,7 +31,10 @@ export { calculateThumbprint as computeJwkThumbprint }
 export async function getPublicJWK(jwkJson: string): Promise<JsonWebKey & { kid: string }> {
   const jwk = JSON.parse(jwkJson)
   const { d: _d, key_ops: _ops, ext: _ext, ...rest } = jwk
-  const publicJwk = { ...rest, key_ops: ['verify'] }
+  // Published JWKs must carry a fully-specified alg (RFC 9864 / signature-key
+  // -08). The SIGNING_KEY secret came from WebCrypto exportKey, which omits
+  // alg, so stamp it here. The key is always Ed25519 (see Env.SIGNING_KEY).
+  const publicJwk = { ...rest, key_ops: ['verify'], alg: rest.alg ?? 'Ed25519' }
   const kid = await calculateThumbprint(publicJwk)
   return { ...publicJwk, kid }
 }
@@ -59,6 +62,9 @@ export function decodeJWTPayload(jwt: string): Record<string, unknown> {
 // JWT alg → WebCrypto parameters
 const JWT_ALG_PARAMS: Record<string, { importAlgo: any; verifyAlgo: any }> = {
   EdDSA: { importAlgo: { name: 'Ed25519' }, verifyAlgo: 'Ed25519' },
+  // RFC 9864 fully-specified identifier; peers moving to signature-key -08
+  // conventions may mint JWTs with this alg instead of polymorphic EdDSA.
+  Ed25519: { importAlgo: { name: 'Ed25519' }, verifyAlgo: 'Ed25519' },
   RS256: {
     importAlgo: { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
     verifyAlgo: 'RSASSA-PKCS1-v1_5',
@@ -91,9 +97,14 @@ export async function verifyJWT(
 
   for (const jwk of candidates) {
     try {
+      // Strip alg before import: signature-key -08 JWKS keys carry the
+      // fully-specified alg "Ed25519" (RFC 9864), which workerd's importKey
+      // rejects for OKP keys (it only accepts "EdDSA" or no alg). The
+      // algorithm is passed explicitly via importAlgo, so alg is redundant.
+      const { alg: _alg, ...importJwk } = jwk as JsonWebKey & { alg?: string }
       const key = await crypto.subtle.importKey(
         'jwk',
-        { ...jwk, key_ops: ['verify'] },
+        { ...importJwk, key_ops: ['verify'] },
         algParams.importAlgo,
         false,
         ['verify']

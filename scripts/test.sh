@@ -48,6 +48,9 @@ check "has at least one key" \
 check "key is OKP/Ed25519" \
   "$(echo "$JWKS" | jq -e '.keys[0].kty == "OKP" and .keys[0].crv == "Ed25519"' 2>/dev/null || echo false)"
 
+check "key has fully-specified alg (Ed25519)" \
+  "$(echo "$JWKS" | jq -e '.keys[0].alg == "Ed25519"' 2>/dev/null || echo false)"
+
 check "key has kid" \
   "$(echo "$JWKS" | jq -e '.keys[0].kid' >/dev/null 2>&1 && echo true || echo false)"
 
@@ -63,7 +66,10 @@ check "returns 401" "$([ "$RESP" = "401" ] && echo true || echo false)"
 
 HEADERS=$(curl -sf -D - -o /dev/null "$BASE/" 2>/dev/null || curl -sD - -o /dev/null "$BASE/" 2>/dev/null)
 check "has Accept-Signature header" \
-  "$(echo "$HEADERS" | grep -qi 'accept-signature' && echo true || echo false)"
+  "$(echo "$HEADERS" | grep -qi '^accept-signature:' && echo true || echo false)"
+
+check "has Accept-Signature-Scheme header" \
+  "$(echo "$HEADERS" | grep -qi '^accept-signature-scheme:' && echo true || echo false)"
 
 echo
 

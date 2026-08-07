@@ -4,6 +4,8 @@ import {
   verify as httpSigVerify,
   generateSignatureErrorHeader,
   generateAcceptSignatureHeader,
+  generateAcceptSignatureSchemeHeader,
+  generateAcceptSignatureAlgHeader,
 } from '@hellocoop/httpsig'
 import {
   importSigningKey,
@@ -44,7 +46,13 @@ app.onError((err, c) => {
 // AAuth-Requirement from the 401 response and the agent never sees
 // the resource_token it needs to exchange at the PS.
 app.use('*', cors({
-  exposeHeaders: ['AAuth-Requirement', 'Accept-Signature', 'Signature-Error'],
+  exposeHeaders: [
+    'AAuth-Requirement',
+    'Accept-Signature',
+    'Accept-Signature-Scheme',
+    'Accept-Signature-Alg',
+    'Signature-Error',
+  ],
 }))
 
 // Identity scopes the PS can release — passed through on resource_token.scope.
@@ -110,16 +118,23 @@ app.get('/', async (c) => {
     const noSig = !c.req.header('signature') && !c.req.header('signature-input')
 
     if (noSig) {
-      // Tell the agent what we expect
+      // Tell the agent what we expect. The sigkey parameter was removed in
+      // -08; the accepted Signature-Key schemes travel in the separate
+      // Accept-Signature-Scheme header.
       const acceptSig = generateAcceptSignatureHeader({
         label: 'sig',
         components: ['@method', '@authority', '@path', 'signature-key'],
-        sigkey: 'jkt',
       })
       emitVerifyFailed(c, 'no_signature')
       return c.json(
         { error: 'signature_required' },
-        { status: 401, headers: { 'Accept-Signature': acceptSig } },
+        {
+          status: 401,
+          headers: {
+            'Accept-Signature': acceptSig,
+            'Accept-Signature-Scheme': generateAcceptSignatureSchemeHeader(['jwt']),
+          },
+        },
       )
     }
 
@@ -127,6 +142,13 @@ app.get('/', async (c) => {
     const headers: Record<string, string> = {}
     if (sigResult.signatureError) {
       headers['Signature-Error'] = generateSignatureErrorHeader(sigResult.signatureError)
+    }
+    // On unsupported_algorithm the accepted set comes back on the result;
+    // advertise it so the client can re-sign with an acceptable algorithm.
+    if (sigResult.acceptSignatureAlg) {
+      headers['Accept-Signature-Alg'] = generateAcceptSignatureAlgHeader(
+        sigResult.acceptSignatureAlg,
+      )
     }
     emitVerifyFailed(c, 'signature_invalid', {
       detail: sigResult.error,

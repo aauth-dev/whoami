@@ -16,7 +16,7 @@
       "get": {
         "operationId": "whoami",
         "summary": "Return identity claims (or initiate AAuth flow)",
-        "description": "Verifies the HTTP signature on the request and responds based on the JWT type presented in the `Signature-Key` header:\n\n- No signature → `401` + `Accept-Signature`\n- `aa-agent+jwt`, no `?scope=` → `200` with agent's own `sub` (and `ps` if present)\n- `aa-agent+jwt`, with `?scope=` → `401` + `AAuth-Requirement` (resource token minted)\n- `aa-auth+jwt` with `whoami` scope → `200` with identity claims\n\nAll requests must carry an HTTP Message Signature over `@method`, `@authority`, `@path`, and `signature-key` using the `jkt` key scheme.",
+        "description": "Verifies the HTTP signature on the request and responds based on the JWT type presented in the `Signature-Key` header:\n\n- No signature → `401` + `Accept-Signature`\n- `aa-agent+jwt`, no `?scope=` → `200` with agent's own `sub` (and `ps` if present)\n- `aa-agent+jwt`, with `?scope=` → `401` + `AAuth-Requirement` (resource token minted)\n- `aa-auth+jwt` with `whoami` scope → `200` with identity claims\n\nAll requests must carry an HTTP Message Signature over `@method`, `@authority`, `@path`, and `signature-key` using the `jwt` key scheme.",
         "parameters": [
           {
             "name": "scope",
@@ -84,13 +84,20 @@
             }
           },
           "401": {
-            "description": "Signature missing, verification failed, or an `auth_token` is required. Inspect the response headers to determine next steps:\n- `Accept-Signature` present → sign your request and retry\n- `Signature-Error` present → your signature was malformed\n- `AAuth-Requirement` present → exchange the `resource-token` at your PS",
+            "description": "Signature missing, verification failed, or an `auth_token` is required. Inspect the response headers to determine next steps:\n- `Accept-Signature` present → sign your request and retry (`Accept-Signature-Scheme` lists the accepted `Signature-Key` schemes)\n- `Signature-Error` present → your signature was malformed\n- `AAuth-Requirement` present → exchange the `resource-token` at your PS",
             "headers": {
               "Accept-Signature": {
                 "description": "Describes the HTTP signature scheme required. Present when no signature was found on the request.",
                 "schema": {
                   "type": "string",
-                  "example": "sig=(); keyid=\"jkt\"; covered-components=\"@method @authority @path signature-key\""
+                  "example": "sig=(\"@method\" \"@authority\" \"@path\" \"signature-key\")"
+                }
+              },
+              "Accept-Signature-Scheme": {
+                "description": "Lists the `Signature-Key` schemes this resource accepts, in preference order. Present when no signature was found on the request.",
+                "schema": {
+                  "type": "string",
+                  "example": "jwt"
                 }
               },
               "AAuth-Requirement": {
