@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "AAuth Who Am I",
-    "version": "1.0",
-    "description": "A minimal AAuth resource server that echoes back the identity claims a resource sees from the caller's AAuth credentials. Useful for testing identity-based access.\n\n## Authentication flow\n\n`GET /` has three outcomes depending on what the caller presents:\n\n1. **No HTTP signature** → `401` with `Accept-Signature` header describing the required signature scheme.\n2. **`aa-agent+jwt` in `Signature-Key`** → `401` with `AAuth-Requirement` header containing a freshly-minted `resource_token` the agent can exchange at its Person Server (PS) for an `auth_token`. Add `?scope=` to request identity claims beyond the default agent identity.\n3. **`aa-auth+jwt` in `Signature-Key`** → `200` with identity claims as JSON."
+    "version": "1.1",
+    "description": "A minimal AAuth resource server that echoes back the identity a resource sees from the caller's AAuth credentials. It answers two different questions at one endpoint, demonstrating two of AAuth's access modes.\n\n## Authentication flow\n\n`GET /` outcomes depend on what the caller presents in `Signature-Key` and on whether `?scope=` is set:\n\n1. **No HTTP signature** → `401` with `Accept-Signature` header describing the required signature scheme.\n2. **`aa-agent+jwt`, no `?scope=`** → `200` with the agent's own identity. This is agent identity access: the resource verifies the agent token and decides on who the agent is. No Person Server, no authorization flow — the replacement for an API key.\n3. **`aa-agent+jwt` with `?scope=`** → `401` with `AAuth-Requirement: requirement=person-token`. The caller is asking about a person, and an agent token cannot produce one: a resource must have verified a person token before it issues a resource token.\n4. **`aa-person+jwt`** → `200` with the person's directed identity, or — when `?scope=` asks for identity claims — `401` with `AAuth-Requirement: requirement=auth-token` carrying a freshly-minted `resource_token` the agent exchanges at its Person Server (PS) for an `auth_token`.\n5. **`aa-auth+jwt`** → `200` with identity claims as JSON.\n\n## Identity\n\nThe two identities are not the same shape.\n\nA **person** is the pair (`iss`, `sub`). `sub` is a directed identifier: unique within the issuer that minted it, not globally, and opaque. This resource always releases `iss` alongside `sub`, and never matches a `sub` from one issuer against a record established under another, however the values compare.\n\nAn **agent** is named by `sub`, an agent identifier of the form `aauth:local@domain`. It is global and self-qualifying, and equally opaque — the local part must not be parsed. The agent token is the only token this resource reads that carries an agent identifier; `agent` was removed from person, resource and auth tokens in AAuth -11."
   },
   "servers": [
     {
@@ -16,13 +16,13 @@
       "get": {
         "operationId": "whoami",
         "summary": "Return identity claims (or initiate AAuth flow)",
-        "description": "Verifies the HTTP signature on the request and responds based on the JWT type presented in the `Signature-Key` header:\n\n- No signature → `401` + `Accept-Signature`\n- `aa-agent+jwt`, no `?scope=` → `200` with agent's own `sub` (and `ps` if present)\n- `aa-agent+jwt`, with `?scope=` → `401` + `AAuth-Requirement` (resource token minted)\n- `aa-auth+jwt` with `whoami` scope → `200` with identity claims\n\nAll requests must carry an HTTP Message Signature over `@method`, `@authority`, `@path`, and `signature-key` using the `jwt` key scheme.",
+        "description": "Verifies the HTTP signature on the request and responds based on the JWT type presented in the `Signature-Key` header and whether `?scope=` is set:\n\n- No signature → `401` + `Accept-Signature`\n- `aa-agent+jwt`, no `?scope=` → `200` with the agent's `iss` and `sub`\n- `aa-agent+jwt`, with `?scope=` → `401` + `AAuth-Requirement: requirement=person-token`\n- `aa-person+jwt`, no `?scope=` → `200` with the person's `iss` and `sub`\n- `aa-person+jwt`, with `?scope=` → `401` + `AAuth-Requirement: requirement=auth-token` (resource token minted)\n- `aa-auth+jwt` with `whoami` scope → `200` with identity claims\n\nAll requests must carry an HTTP Message Signature over `@method`, `@authority`, `@path`, and `signature-key` using the `jwt` key scheme.\n\nThis operation carries no `x-aauth-access-mode` annotation. R3 annotations are sparse — an operation with none takes the resource's `access_mode`, which is `agent-token`, the minimum this operation requires. The escalation to `person-token` and then `auth-token` is driven by the `scope` parameter, which a per-operation annotation cannot express; the runtime `AAuth-Requirement` is authoritative.",
         "parameters": [
           {
             "name": "scope",
             "in": "query",
             "required": false,
-            "description": "Space-separated list of identity scopes to include in the minted `resource_token` (e.g. `email profile`). Only valid when presenting an `aa-agent+jwt`. The `whoami` scope is always included automatically.",
+            "description": "Space-separated list of identity scopes to include in the minted `resource_token` (e.g. `email profile`). Setting it changes the question from \"who is this agent\" to \"who is the person this agent acts for\", and so escalates the call: an `aa-agent+jwt` is challenged for a person token, and an `aa-person+jwt` receives a resource token for the `auth-token` flow. The `whoami` scope is always included automatically.",
             "schema": {
               "type": "string",
               "example": "email profile"
@@ -36,12 +36,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Identity claims echoed back. Content depends on the JWT type presented:\n- `aa-auth+jwt`: identity claims from the Person Server (all non-infrastructure claims)\n- `aa-agent+jwt` with no `?scope=`: agent's own `sub` and optionally `ps`",
+            "description": "Identity echoed back. Content depends on the JWT type presented:\n- `aa-auth+jwt`: `iss` and `sub` plus the identity claims the Person Server released\n- `aa-person+jwt` with no `?scope=`: the person's `iss` and `sub` (and `tenant` when the person token carried one)\n- `aa-agent+jwt` with no `?scope=`: the agent's `iss` and `sub` (and `ps`, `parent_agent` when present)",
             "content": {
               "application/json": {
                 "schema": {
                   "oneOf": [
                     { "$ref": "#/components/schemas/IdentityClaims" },
+                    { "$ref": "#/components/schemas/PersonIdentity" },
                     { "$ref": "#/components/schemas/AgentIdentity" }
                   ]
                 },
@@ -49,15 +50,24 @@
                   "authTokenClaims": {
                     "summary": "Identity claims from auth_token",
                     "value": {
-                      "sub": "https://person.example/.well-known/aauth-person.json#abc123",
+                      "iss": "https://person.example",
+                      "sub": "8f14e45fceea167a5a36dedd4bea2543",
                       "email": "alice@example.com",
                       "name": "Alice Example"
                     }
                   },
-                  "agentIdentity": {
-                    "summary": "Agent identity (no scope requested)",
+                  "personIdentity": {
+                    "summary": "Directed identity from person_token (no scope requested)",
                     "value": {
-                      "sub": "https://agent.example",
+                      "iss": "https://person.example",
+                      "sub": "8f14e45fceea167a5a36dedd4bea2543"
+                    }
+                  },
+                  "agentIdentity": {
+                    "summary": "Agent identity from agent_token (no scope requested)",
+                    "value": {
+                      "iss": "https://agent.example",
+                      "sub": "aauth:assistant-v2@agent.example",
                       "ps": "https://person.example"
                     }
                   }
@@ -66,7 +76,7 @@
             }
           },
           "400": {
-            "description": "Bad request — invalid scope or missing required JWT claim",
+            "description": "Bad request — unsupported JWT type or an unknown scope",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/Error" },
@@ -75,16 +85,16 @@
                     "summary": "Unknown scope",
                     "value": { "error": "invalid_scope", "unknown": ["badscope"] }
                   },
-                  "missingClaim": {
-                    "summary": "Missing required claim",
-                    "value": { "error": "agent_token missing ps claim" }
+                  "unsupportedType": {
+                    "summary": "Signature-Key JWT is not an AAuth token this endpoint accepts",
+                    "value": { "error": "unsupported JWT type: aa-resource+jwt" }
                   }
                 }
               }
             }
           },
           "401": {
-            "description": "Signature missing, verification failed, or an `auth_token` is required. Inspect the response headers to determine next steps:\n- `Accept-Signature` present → sign your request and retry (`Accept-Signature-Scheme` lists the accepted `Signature-Key` schemes)\n- `Signature-Error` present → your signature was malformed\n- `AAuth-Requirement` present → exchange the `resource-token` at your PS",
+            "description": "Signature missing, verification failed, or a further credential is required. Inspect the response headers to determine next steps:\n- `Accept-Signature` present → sign your request and retry (`Accept-Signature-Scheme` lists the accepted `Signature-Key` schemes)\n- `Signature-Error` present → your signature was malformed\n- `AAuth-Requirement: requirement=person-token` → obtain a person token for this resource from your PS's person token endpoint and retry\n- `AAuth-Requirement: requirement=auth-token` → exchange the `resource-token` at your PS",
             "headers": {
               "Accept-Signature": {
                 "description": "Describes the HTTP signature scheme required. Present when no signature was found on the request.",
@@ -101,10 +111,13 @@
                 }
               },
               "AAuth-Requirement": {
-                "description": "Contains a freshly-minted `resource_token` the agent exchanges at its Person Server to obtain an `auth_token`. Present when an `aa-agent+jwt` was verified and scopes were requested.",
+                "description": "Names what the agent must obtain next. `requirement=person-token` carries no parameters — obtain a person token for this resource from your PS's `person_token_endpoint` and retry. `requirement=auth-token` carries a freshly-minted `resource-token` the agent exchanges at the Person Server that issued its person token.",
                 "schema": {
                   "type": "string",
-                  "example": "requirement=auth-token; resource-token=\"eyJ...\""
+                  "examples": [
+                    "requirement=person-token",
+                    "requirement=auth-token; resource-token=\"eyJ...\""
+                  ]
                 }
               },
               "Signature-Error": {
@@ -124,9 +137,17 @@
                     "summary": "Signature verification failed",
                     "value": { "error": "signature_verification_failed", "detail": "signature component mismatch" }
                   },
+                  "personTokenRequired": {
+                    "summary": "Agent token presented with ?scope= — a person token is required first",
+                    "value": { "error": "person_token_required" }
+                  },
                   "authTokenRequired": {
                     "summary": "Resource token minted — exchange at PS",
                     "value": { "error": "auth_token_required" }
+                  },
+                  "personTokenAudMismatch": {
+                    "summary": "Person token was issued for a different resource",
+                    "value": { "error": "person_token aud mismatch" }
                   },
                   "authTokenExpired": {
                     "summary": "Presented auth_token is expired",
@@ -170,7 +191,7 @@
             }
           },
           "502": {
-            "description": "Could not reach issuer or Person Server",
+            "description": "Could not reach the token issuer's metadata or JWKS",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/Error" },
@@ -179,9 +200,9 @@
                     "summary": "Cannot reach issuer",
                     "value": { "error": "Cannot reach issuer: fetch failed" }
                   },
-                  "psUnreachable": {
-                    "summary": "Cannot reach Person Server",
-                    "value": { "error": "Cannot reach PS: fetch failed" }
+                  "missingJwksUri": {
+                    "summary": "Issuer metadata has no jwks_uri",
+                    "value": { "error": "Issuer metadata missing jwks_uri" }
                   }
                 }
               }
@@ -194,7 +215,7 @@
       "get": {
         "operationId": "getResourceMetadata",
         "summary": "AAuth resource server metadata",
-        "description": "Returns metadata about this resource server in the AAuth Resource Server Metadata format. Agents discover this document to learn the resource's identity, available scopes, JWKS URI, and supported R3 vocabularies.",
+        "description": "Returns metadata about this resource server in the AAuth Resource Server Metadata format. Agents discover this document to learn the resource's identity, access mode, available scopes, JWKS URI, and supported R3 vocabularies. Unauthenticated — no AAuth credential is required or read.",
         "responses": {
           "200": {
             "description": "Resource server metadata",
@@ -204,9 +225,10 @@
                 "example": {
                   "issuer": "https://whoami.aauth.dev",
                   "jwks_uri": "https://whoami.aauth.dev/.well-known/jwks.json",
-                  "client_name": "AAuth Who Am I",
+                  "name": "AAuth Who Am I",
                   "description": "Echoes back the identity claims a resource sees from your AAuth credentials — a minimal resource for testing identity-based access.",
                   "logo_uri": "https://whoami.aauth.dev/logo.png",
+                  "access_mode": "agent-token",
                   "scope_descriptions": {
                     "whoami": "Echo your provided identity claims"
                   },
@@ -224,7 +246,7 @@
       "get": {
         "operationId": "getJWKS",
         "summary": "JSON Web Key Set",
-        "description": "Returns the public key(s) used by this resource server to sign `resource_token` JWTs (`aa-resource+jwt`). Person Servers use this to verify resource tokens they receive.",
+        "description": "Returns the public key(s) used by this resource server to sign `resource_token` JWTs (`aa-resource+jwt`). Person Servers use this to verify resource tokens they receive. Keys carry the RFC 9864 fully-specified `alg` value `Ed25519`. Unauthenticated — no AAuth credential is required or read.",
         "responses": {
           "200": {
             "description": "JWKS with the resource server's public key(s)",
@@ -236,6 +258,7 @@
                     {
                       "kty": "OKP",
                       "crv": "Ed25519",
+                      "alg": "Ed25519",
                       "x": "base64url-encoded-public-key",
                       "kid": "key-id"
                     }
@@ -253,42 +276,76 @@
       "httpSignature": {
         "type": "http",
         "scheme": "signature",
-        "description": "HTTP Message Signatures (RFC 9421). The request must carry:\n- A `Signature` header with label `sig`\n- A `Signature-Input` header referencing `@method`, `@authority`, `@path`, and `signature-key`\n- A `Signature-Key` header containing either an `aa-agent+jwt` or `aa-auth+jwt` compact JWT, using the `jwt=` scheme"
+        "description": "HTTP Message Signatures (RFC 9421). The request must carry:\n- A `Signature` header with label `sig`\n- A `Signature-Input` header referencing `@method`, `@authority`, `@path`, and `signature-key`\n- A `Signature-Key` header containing an `aa-agent+jwt`, `aa-person+jwt`, or `aa-auth+jwt` compact JWT, using the `jwt=` scheme\n\nThe token's `cnf.jwk` must be the key that signed the request, and must carry a fully-specified `alg` (RFC 9864). The polymorphic `EdDSA` identifier is rejected."
       }
     },
     "schemas": {
-      "IdentityClaims": {
-        "type": "object",
-        "description": "Identity claims from the Person Server, after stripping JWT infrastructure claims (`iss`, `aud`, `exp`, `iat`, `jti`, `cnf`, `dwk`, `act`, `scope`). The exact set of properties depends on which scopes were granted.",
-        "additionalProperties": true,
-        "properties": {
-          "sub": {
-            "type": "string",
-            "description": "Subject identifier (person's stable ID at the PS)",
-            "example": "https://person.example/.well-known/aauth-person.json#abc123"
-          },
-          "email": { "type": "string", "example": "alice@example.com" },
-          "name": { "type": "string", "example": "Alice Example" },
-          "picture": { "type": "string", "format": "uri" }
-        }
-      },
       "AgentIdentity": {
         "type": "object",
-        "description": "Agent's own identity, returned when an `aa-agent+jwt` is verified but no `?scope=` was requested.",
-        "required": ["sub"],
+        "description": "An agent's own identity, returned when an `aa-agent+jwt` is verified and no `?scope=` was requested. Agent identity access — no Person Server is involved.",
+        "required": ["iss", "sub"],
         "properties": {
+          "iss": {
+            "type": "string",
+            "format": "uri",
+            "description": "The agent provider that issued the agent token and vouches for `sub`.",
+            "example": "https://agent.example"
+          },
           "sub": {
             "type": "string",
-            "description": "Agent subject identifier",
-            "example": "https://agent.example"
+            "description": "Agent identifier, `aauth:local@domain`. Global and stable across key rotations. Compare it with exact, case-sensitive string comparison; do not parse the local part — the `+` in a sub-agent identifier is for readability, and `parent_agent` is the authoritative marker.",
+            "example": "aauth:assistant-v2@agent.example"
           },
           "ps": {
             "type": "string",
             "format": "uri",
-            "description": "URL of the agent's Person Server (if present in agent_token)",
+            "description": "The agent's Person Server, when the agent token names one. Distinct from `iss`.",
             "example": "https://person.example"
+          },
+          "parent_agent": {
+            "type": "string",
+            "description": "Present only on a sub-agent's token, naming its parent.",
+            "example": "aauth:planner.7f3c@agent.example"
           }
         }
+      },
+      "PersonIdentity": {
+        "type": "object",
+        "description": "A person's identity at this resource: the pair (`iss`, `sub`). Neither half means anything without the other.",
+        "required": ["iss", "sub"],
+        "properties": {
+          "iss": {
+            "type": "string",
+            "format": "uri",
+            "description": "The issuer whose namespace `sub` belongs to — the Person Server in three-party, the Access Server in four-party.",
+            "example": "https://person.example"
+          },
+          "sub": {
+            "type": "string",
+            "description": "Directed subject identifier. Opaque and unique only within `iss`. Do not parse it, do not normalize it, and do not compare it to a `sub` from another issuer.",
+            "example": "8f14e45fceea167a5a36dedd4bea2543"
+          },
+          "tenant": {
+            "type": "string",
+            "description": "Organization the person belongs to, when the token carried one. Organizational context, not part of the identifier.",
+            "example": "acme"
+          }
+        }
+      },
+      "IdentityClaims": {
+        "allOf": [
+          { "$ref": "#/components/schemas/PersonIdentity" },
+          {
+            "type": "object",
+            "description": "Identity claims released by the auth token's issuer, after stripping JWT infrastructure claims (`aud`, `exp`, `iat`, `jti`, `cnf`, `dwk`, `act`, `scope`, `ps`, `mission_s256`). The exact set depends on which scopes were granted.",
+            "additionalProperties": true,
+            "properties": {
+              "email": { "type": "string", "example": "alice@example.com" },
+              "name": { "type": "string", "example": "Alice Example" },
+              "picture": { "type": "string", "format": "uri" }
+            }
+          }
+        ]
       },
       "ResourceMetadata": {
         "type": "object",
@@ -296,9 +353,14 @@
         "properties": {
           "issuer": { "type": "string", "format": "uri" },
           "jwks_uri": { "type": "string", "format": "uri" },
-          "client_name": { "type": "string" },
+          "name": { "type": "string" },
           "description": { "type": "string" },
           "logo_uri": { "type": "string", "format": "uri" },
+          "access_mode": {
+            "type": "string",
+            "description": "The credential flow an agent should expect by default. This resource declares `agent-token`, the minimum that gets an answer: an agent token alone returns the agent's identity. Requesting identity scopes escalates to `person-token` and then `auth-token`. Declaring the minimum means no agent skips this resource for a setup it does have; the runtime `AAuth-Requirement` is authoritative.",
+            "example": "agent-token"
+          },
           "scope_descriptions": {
             "type": "object",
             "additionalProperties": { "type": "string" }
@@ -324,6 +386,7 @@
               "properties": {
                 "kty": { "type": "string", "example": "OKP" },
                 "crv": { "type": "string", "example": "Ed25519" },
+                "alg": { "type": "string", "example": "Ed25519" },
                 "x": { "type": "string" },
                 "kid": { "type": "string" }
               }

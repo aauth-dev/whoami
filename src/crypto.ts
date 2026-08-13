@@ -21,7 +21,13 @@ function base64urlDecode(str: string): Uint8Array {
 }
 
 export async function importSigningKey(jwkJson: string): Promise<CryptoKey> {
-  const jwk = JSON.parse(jwkJson)
+  const { alg: _alg, ...jwk } = JSON.parse(jwkJson)
+  // `alg` is stripped for the same reason it is stripped in verifyJWT: an OKP
+  // JWK carrying the RFC 9864 fully-specified "Ed25519" is rejected by
+  // workerd's importKey, which only accepts "EdDSA" or no alg. The algorithm
+  // is supplied explicitly below, so the member is redundant either way. This
+  // is what lets the SIGNING_KEY secret carry alg: "Ed25519" without the
+  // Worker failing to sign.
   return crypto.subtle.importKey('jwk', jwk, { name: 'Ed25519' }, false, ['sign'])
 }
 
@@ -59,11 +65,20 @@ export function decodeJWTPayload(jwt: string): Record<string, unknown> {
   return JSON.parse(new TextDecoder().decode(base64urlDecode(jwt.split('.')[1])))
 }
 
-// JWT alg → WebCrypto parameters
+// JWT alg → WebCrypto parameters.
+//
+// Every entry is a fully-specified identifier. AAuth §Signature Algorithms
+// says implementations MUST NOT accept `none`, the polymorphic `EdDSA`
+// identifier, or any symmetric algorithm, and states no transition
+// allowance — so `EdDSA` is deliberately absent, and a JWT presenting it
+// fails with "unsupported alg" before any key is imported.
+//
+// This is a flag day with the issuers, not a one-sided tightening: Wallet's
+// svr/issuer/sign.js signs AAuth token types with `EdDSA` today, and must
+// ship `Ed25519` in the same window or whoami rejects the auth tokens
+// person.hello.coop issues.
 const JWT_ALG_PARAMS: Record<string, { importAlgo: any; verifyAlgo: any }> = {
-  EdDSA: { importAlgo: { name: 'Ed25519' }, verifyAlgo: 'Ed25519' },
-  // RFC 9864 fully-specified identifier; peers moving to signature-key -08
-  // conventions may mint JWTs with this alg instead of polymorphic EdDSA.
+  // RFC 9864 fully-specified identifier for Ed25519.
   Ed25519: { importAlgo: { name: 'Ed25519' }, verifyAlgo: 'Ed25519' },
   RS256: {
     importAlgo: { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },

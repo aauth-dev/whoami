@@ -12,9 +12,20 @@ import {
   getPublicJWK,
   signJWT,
   generateJTI,
-  computeJwkThumbprint,
   verifyJWT,
 } from './crypto'
+import {
+  TOKEN_TYP,
+  DWK,
+  SIGNING_ALG,
+  fetchIssuerJwks,
+  identityRecordKey,
+  isServerIdentifier,
+  verifyAgentToken,
+  verifyConfirmationKey,
+  verifyPersonToken,
+  type PersonIdentity,
+} from './aauth'
 import { emit, emitVerifyFailed } from './events'
 import type { Env } from './types'
 
@@ -46,6 +57,9 @@ app.onError((err, c) => {
 // AAuth-Requirement from the 401 response and the agent never sees
 // the resource_token it needs to exchange at the PS.
 app.use('*', cors({
+  // '*' is the value hono has always defaulted to here; recent @types make
+  // `origin` required, so it is now stated rather than implied.
+  origin: '*',
   exposeHeaders: [
     'AAuth-Requirement',
     'Accept-Signature',
@@ -64,6 +78,9 @@ const PS_IDENTITY_SCOPES: Set<string> = new Set([
   'tenant_sub', 'org', 'groups', 'roles',
 ])
 
+// Resource tokens SHOULD NOT have a lifetime exceeding 5 minutes.
+const RESOURCE_TOKEN_LIFETIME = 300
+
 // ── Well-known endpoints ──
 
 app.get('/.well-known/aauth-resource.json', (c) => {
@@ -75,6 +92,12 @@ app.get('/.well-known/aauth-resource.json', (c) => {
     description:
       'Echoes back the identity claims a resource sees from your AAuth credentials — a minimal resource for testing identity-based access.',
     logo_uri: `${origin}/logo.png`,
+    // The lowest bar that gets a useful answer: an agent token alone returns
+    // the agent's own identity. A person token returns the person's. Asking
+    // for identity scopes with ?scope= escalates to auth-token. Declaring the
+    // minimum means no agent skips this resource for a setup it does have;
+    // the runtime AAuth-Requirement is authoritative in every case.
+    access_mode: 'agent-token',
     scope_descriptions: {
       whoami: 'Echo your provided identity claims',
     },
@@ -91,15 +114,21 @@ app.get('/.well-known/jwks.json', async (c) => {
 
 // ── Main endpoint ──
 //
-// Three outcomes based on what the caller presents:
+// Four outcomes based on what the caller presents:
 //
 // 1. No HTTP signature → 401 + Accept-Signature header
 //    (tells the agent what signature scheme we expect)
 //
-// 2. agent_token in Signature-Key → 401 + AAuth-Requirement header
-//    (resource token the agent takes to its PS for an auth_token)
+// 2. agent_token in Signature-Key → 200 + the agent's own identity (agent
+//    identity access), or, when ?scope= asks about a person, 401 +
+//    AAuth-Requirement: requirement=person-token — a resource MUST have
+//    verified a person token before it issues a resource token
 //
-// 3. auth_token in Signature-Key → 200 + identity claims as JSON
+// 3. person_token in Signature-Key → 200 + the person's identity (iss, sub),
+//    or, when ?scope= asks for identity claims, 401 + AAuth-Requirement
+//    carrying a resource token the agent takes to its PS for an auth_token
+//
+// 4. auth_token in Signature-Key → 200 + identity claims as JSON
 
 app.get('/', async (c) => {
   const url = new URL(c.req.url)
@@ -171,12 +200,20 @@ app.get('/', async (c) => {
   const jwtRaw = sigResult.jwt.raw
 
   // ── auth_token → verify and return identity claims ──
-  if (jwtHeader.typ === 'aa-auth+jwt') {
+  //
+  // Only `typ` distinguishes an auth token from a person token, so the branch
+  // is exact-match: an aa-person+jwt never reaches the auth-token path.
+  if (jwtHeader.typ === TOKEN_TYP.auth) {
     return handleAuthToken(c, jwtRaw, jwtPayload, sigResult.thumbprint)
   }
 
-  // ── agent_token → mint resource token, return 401 ──
-  if (jwtHeader.typ === 'aa-agent+jwt') {
+  // ── person_token → identity, or mint a resource token ──
+  if (jwtHeader.typ === TOKEN_TYP.person) {
+    return handlePersonToken(c, jwtRaw, jwtPayload, sigResult.thumbprint)
+  }
+
+  // ── agent_token → agent identity, or 401 requirement=person-token ──
+  if (jwtHeader.typ === TOKEN_TYP.agent) {
     return handleAgentToken(c, jwtRaw, jwtPayload, sigResult.thumbprint)
   }
 
@@ -192,27 +229,29 @@ async function handleAuthToken(
   payload: Record<string, unknown>,
   callerJkt: string,
 ) {
-  // Verify JWT against issuer's JWKS (the Person Server)
+  // dwk names the metadata document the issuer's keys are discovered through:
+  // aauth-person.json from a PS asserting identity, aauth-access.json from an
+  // AS. Anything else is not an auth token issuer.
   const iss = payload.iss as string | undefined
-  const dwk = (payload.dwk as string) || 'aauth-person.json'
+  const dwk = payload.dwk
   if (!iss) return c.json({ error: 'auth_token missing iss' }, 401)
+  if (dwk !== DWK.person && dwk !== DWK.access) {
+    emitVerifyFailed(c, 'auth_token_bad_dwk', { iss, dwk })
+    return c.json({ error: `auth_token dwk must be ${DWK.person} or ${DWK.access}` }, 401)
+  }
+  if (!isServerIdentifier(iss)) {
+    emitVerifyFailed(c, 'auth_token_bad_iss', { iss })
+    return c.json({ error: 'auth_token iss is not a valid server identifier' }, 401)
+  }
 
-  let jwks: { keys: JsonWebKey[] }
-  try {
-    const metaRes = await fetch(`${iss}/.well-known/${dwk}`)
-    if (!metaRes.ok) return c.json({ error: `Failed to fetch issuer metadata: ${metaRes.status}` }, 502)
-    const meta = (await metaRes.json()) as Record<string, unknown>
-    const jwksUri = meta.jwks_uri as string
-    if (!jwksUri) return c.json({ error: 'Issuer metadata missing jwks_uri' }, 502)
-    const jwksRes = await fetch(jwksUri)
-    if (!jwksRes.ok) return c.json({ error: `Failed to fetch issuer JWKS: ${jwksRes.status}` }, 502)
-    jwks = (await jwksRes.json()) as { keys: JsonWebKey[] }
-  } catch (err) {
-    return c.json({ error: `Cannot reach issuer: ${(err as Error).message}` }, 502)
+  const lookup = await fetchIssuerJwks(iss, dwk)
+  if (!lookup.ok) {
+    emitVerifyFailed(c, 'auth_token_key_discovery_failed', { iss, detail: lookup.error })
+    return c.json({ error: lookup.error }, lookup.status)
   }
 
   try {
-    await verifyJWT(jwtRaw, jwks)
+    await verifyJWT(jwtRaw, lookup.jwks)
   } catch (err) {
     emitVerifyFailed(c, 'auth_token_jwt_verify_failed', {
       iss,
@@ -237,6 +276,23 @@ async function handleAuthToken(
     return c.json({ error: 'auth_token expired' }, 401)
   }
 
+  // cnf.jwk is REQUIRED and must be the key that signed this request.
+  const cnfResult = await verifyConfirmationKey(payload.cnf, callerJkt)
+  if (!cnfResult.ok) {
+    emitVerifyFailed(c, 'auth_token_cnf_mismatch', { iss, detail: cnfResult.error })
+    return c.json({ error: `auth_token ${cnfResult.error}` }, 401)
+  }
+
+  // Verification step 7: `sub` is present, and (iss, sub) matches or
+  // establishes this resource's record for the person. The value is opaque —
+  // whoami never parses it, and never compares it to a sub from another iss.
+  const sub = payload.sub
+  if (typeof sub !== 'string' || sub === '') {
+    emitVerifyFailed(c, 'auth_token_missing_sub', { iss })
+    return c.json({ error: 'auth_token missing sub' }, 401)
+  }
+  const identity: PersonIdentity = { iss, sub }
+
   const scopeStr = typeof payload.scope === 'string' ? payload.scope : ''
   const scopes = scopeStr.split(/\s+/).filter(Boolean)
   if (!scopes.includes('whoami')) {
@@ -248,9 +304,14 @@ async function handleAuthToken(
     return c.json({ error: 'insufficient_scope', required: 'whoami', granted: scopes }, 403)
   }
 
-  // Return identity claims — strip JWT infrastructure claims
-  const INFRA_CLAIMS = new Set(['iss', 'aud', 'exp', 'iat', 'jti', 'cnf', 'dwk', 'act', 'scope'])
-  const claims: Record<string, unknown> = {}
+  // Return identity claims. `iss` and `sub` are released together and first:
+  // a directed sub on its own names nobody, so whoami never hands one out
+  // without the issuer whose namespace it belongs to.
+  const INFRA_CLAIMS = new Set([
+    'iss', 'sub', 'aud', 'exp', 'iat', 'jti', 'cnf', 'dwk', 'act', 'scope',
+    'ps', 'mission_s256',
+  ])
+  const claims: Record<string, unknown> = { iss: identity.iss, sub: identity.sub }
   for (const [key, value] of Object.entries(payload)) {
     if (!INFRA_CLAIMS.has(key)) {
       claims[key] = value
@@ -260,8 +321,11 @@ async function handleAuthToken(
   emit(c, {
     event: 'aauth.whoami.auth_verified',
     msg: 'auth_token verified',
-    iss,
-    agent_sub: payload.sub,
+    person_iss: identity.iss,
+    person_sub: identity.sub,
+    identity_key: identityRecordKey(identity),
+    ps: payload.ps,
+    mission_s256: payload.mission_s256,
     scope: scopeStr,
     jkt: callerJkt,
   })
@@ -270,6 +334,24 @@ async function handleAuthToken(
 }
 
 // ── Agent token handler ──
+//
+// Two outcomes, and which one applies is decided by what the caller asked
+// for, not by what it presented.
+//
+// With no scopes requested, this is agent identity access
+// (#overview-identity-access): the resource verifies the agent token and
+// answers with the agent's own identity. No PS, no authorization flow — the
+// API-key replacement. The agent token is the one token a resource reads that
+// still carries an agent identifier; -11 removed `agent` from person,
+// resource and auth tokens, not from here.
+//
+// With scopes requested, the caller is asking about a *person*, and an agent
+// token cannot produce one: a resource MUST have verified a person token
+// before it issues a resource token. So the response is the
+// requirement=person-token challenge, which carries no parameters — and the
+// agent token is neither fetched nor verified on that path, because nothing
+// in it would change the answer and following its `iss` would let an attacker
+// drive outbound requests from this Worker for free.
 
 async function handleAgentToken(
   c: import('hono').Context<HonoEnv>,
@@ -277,72 +359,101 @@ async function handleAgentToken(
   payload: Record<string, unknown>,
   callerJkt: string,
 ) {
-  // Verify agent_token against its issuer's JWKS (the agent server)
-  const agentIss = payload.iss as string | undefined
-  const agentDwk = (payload.dwk as string) || 'aauth-agent.json'
-  if (!agentIss) return c.json({ error: 'agent_token missing iss' }, 401)
-
-  let jwks: { keys: JsonWebKey[] }
-  try {
-    const metaRes = await fetch(`${agentIss}/.well-known/${agentDwk}`)
-    if (!metaRes.ok) return c.json({ error: `Failed to fetch agent server metadata: ${metaRes.status}` }, 502)
-    const meta = (await metaRes.json()) as Record<string, unknown>
-    const jwksUri = meta.jwks_uri as string
-    if (!jwksUri) return c.json({ error: 'Agent server metadata missing jwks_uri' }, 502)
-    const jwksRes = await fetch(jwksUri)
-    if (!jwksRes.ok) return c.json({ error: `Failed to fetch agent server JWKS: ${jwksRes.status}` }, 502)
-    jwks = (await jwksRes.json()) as { keys: JsonWebKey[] }
-  } catch (err) {
-    return c.json({ error: `Cannot reach agent server: ${(err as Error).message}` }, 502)
-  }
-
-  try {
-    await verifyJWT(jwtRaw, jwks)
-  } catch (err) {
-    emitVerifyFailed(c, 'agent_token_jwt_verify_failed', {
-      iss: agentIss,
-      detail: (err as Error).message,
-    })
-    return c.json({ error: `agent_token verification failed: ${(err as Error).message}` }, 401)
-  }
-
-  const now = Math.floor(Date.now() / 1000)
-  if (!payload.exp || (payload.exp as number) < now) {
-    emitVerifyFailed(c, 'agent_token_expired', { iss: agentIss, exp: payload.exp })
-    return c.json({ error: 'agent_token expired' }, 401)
-  }
-
-  // If no scope requested, return the agent's own identity directly
   const scopeParam = c.req.query('scope') || ''
   const requestedScopes = scopeParam.trim().split(/\s+/).filter(Boolean)
 
-  if (requestedScopes.length === 0) {
-    const identity: Record<string, unknown> = { sub: payload.sub }
-    if (payload.ps) identity.ps = payload.ps
+  if (requestedScopes.length > 0) {
     emit(c, {
-      event: 'aauth.whoami.agent_identity_returned',
-      msg: 'agent_token verified; no scopes requested, returning identity',
-      agent_sub: payload.sub,
-      agent_jkt: callerJkt,
-      ps: payload.ps,
+      event: 'aauth.whoami.person_token_required',
+      msg: 'agent_token presented with a scope request; challenging for a person token',
+      requested_scope: requestedScopes.join(' '),
     })
-    return c.json(identity)
+    return c.json(
+      { error: 'person_token_required' },
+      {
+        status: 401,
+        headers: {
+          'AAuth-Requirement': 'requirement=person-token',
+        },
+      },
+    )
   }
 
-  // PS URL from agent_token's ps claim
-  const psUrl = payload.ps as string | undefined
-  if (!psUrl) return c.json({ error: 'agent_token missing ps claim' }, 400)
+  const now = Math.floor(Date.now() / 1000)
+  const result = await verifyAgentToken(jwtRaw, payload, { signingJkt: callerJkt, now })
+  if (!result.ok) {
+    emitVerifyFailed(c, result.reason, { iss: payload.iss, detail: result.error })
+    return c.json({ error: result.error }, result.status)
+  }
+  const { identity } = result.token
 
-  // Fetch PS metadata for resource_token aud
-  let psIssuer: string
-  try {
-    const psRes = await fetch(`${psUrl}/.well-known/aauth-person.json`)
-    if (!psRes.ok) return c.json({ error: `Failed to fetch PS metadata: ${psRes.status}` }, 502)
-    const psMeta = (await psRes.json()) as Record<string, unknown>
-    if (!psMeta.issuer) return c.json({ error: 'PS metadata missing issuer' }, 502)
-    psIssuer = psMeta.issuer as string
-  } catch (err) {
-    return c.json({ error: `Cannot reach PS: ${(err as Error).message}` }, 502)
+  // An agent identifier is global and self-qualifying (`aauth:local@domain`),
+  // unlike a person's directed `sub` — but it is just as opaque. `iss` is
+  // released alongside it because it names the provider that vouched for it.
+  const body: Record<string, unknown> = { iss: identity.iss, sub: identity.sub }
+  if (identity.ps) body.ps = identity.ps
+  if (identity.parent_agent) body.parent_agent = identity.parent_agent
+
+  emit(c, {
+    event: 'aauth.whoami.agent_identity_returned',
+    msg: 'agent_token verified; returning agent identity',
+    agent_iss: identity.iss,
+    agent_sub: identity.sub,
+    agent_jkt: result.token.jkt,
+    ps: identity.ps,
+  })
+
+  return c.json(body)
+}
+
+// ── Person token handler ──
+//
+// The person token is what makes the identity this resource records
+// PS-asserted rather than agent-asserted. With no scopes requested it is
+// enough on its own — whoami serves the identity it just verified. With
+// scopes requested it becomes the basis of a resource token.
+
+async function handlePersonToken(
+  c: import('hono').Context<HonoEnv>,
+  jwtRaw: string,
+  payload: Record<string, unknown>,
+  callerJkt: string,
+) {
+  const origin = c.env.ORIGIN
+  const now = Math.floor(Date.now() / 1000)
+
+  const result = await verifyPersonToken(jwtRaw, payload, {
+    resource: origin,
+    signingJkt: callerJkt,
+    now,
+  })
+  if (!result.ok) {
+    emitVerifyFailed(c, result.reason, { iss: payload.iss, detail: result.error })
+    return c.json({ error: result.error }, result.status)
+  }
+  const person = result.token
+  const { identity } = person
+
+  const scopeParam = c.req.query('scope') || ''
+  const requestedScopes = scopeParam.trim().split(/\s+/).filter(Boolean)
+
+  // No scopes requested — identity access. The person token already carries
+  // the person's identity at this resource, so no resource token is needed.
+  if (requestedScopes.length === 0) {
+    const body: Record<string, unknown> = { iss: identity.iss, sub: identity.sub }
+    // tenant is organizational context, not part of the identifier.
+    if (person.tenant) body.tenant = person.tenant
+    emit(c, {
+      event: 'aauth.whoami.person_identity_returned',
+      msg: 'person_token verified; no scopes requested, returning identity',
+      person_iss: identity.iss,
+      person_sub: identity.sub,
+      identity_key: identityRecordKey(identity),
+      person_token_jti: person.jti,
+      mission_s256: person.mission_s256,
+      agent_jkt: person.jkt,
+    })
+    return c.json(body)
   }
 
   // Build scope: always "whoami" + requested identity scopes from ?scope=
@@ -352,38 +463,59 @@ async function handleAgentToken(
   }
   const scopeString = ['whoami', ...requestedScopes].join(' ')
 
-  // Mint resource token
-  const origin = c.env.ORIGIN
+  // Mint resource token. `aud` is the PS that issued the person token — the
+  // same issuer whose namespace `sub` belongs to.
   const privateKey = await importSigningKey(c.env.SIGNING_KEY)
   const publicJwk = await getPublicJWK(c.env.SIGNING_KEY)
-  const cnf = payload.cnf as { jwk: JsonWebKey } | undefined
-  if (!cnf?.jwk) return c.json({ error: 'agent_token missing cnf.jwk' }, 400)
-  const agentJkt = await computeJwkThumbprint(cnf.jwk)
 
-  const rtHeader = { alg: 'Ed25519', typ: 'aa-resource+jwt', kid: publicJwk.kid }
-  const rtPayload = {
+  // A resource token derived from a person token must not outlive it.
+  //
+  // This is the most a resource can do about mission expiry, and it is not
+  // the mission clamp. -11 says a token carrying `mission_s256` MUST NOT
+  // expire after the mission's `expires_at` — but a resource only ever sees
+  // `mission_s256`, a hash, and has no endpoint that turns it back into an
+  // expiry. The real clamp lives at the PS, which holds the approved mission
+  // and re-checks it when it resolves `person_token_jti`. Do not "fix" this
+  // by trying to read an expiry the resource cannot have.
+  const exp = Math.min(now + RESOURCE_TOKEN_LIFETIME, person.exp)
+
+  const rtHeader = { alg: SIGNING_ALG, typ: TOKEN_TYP.resource, kid: publicJwk.kid }
+  const rtPayload: Record<string, unknown> = {
     iss: origin,
-    dwk: 'aauth-resource.json',
-    aud: psIssuer,
+    dwk: DWK.resource,
+    aud: identity.iss,
     jti: generateJTI(),
-    agent: payload.sub as string,
-    agent_jkt: agentJkt,
+    // ps, sub and person_token_jti are copied from the person token this
+    // resource verified. There is no agent claim in -11 — agent_jkt binds the
+    // token to the agent's key, and the PS learns the agent's identity from
+    // the agent token that signs the token request.
+    ps: identity.iss,
+    sub: identity.sub,
+    person_token_jti: person.jti,
+    agent_jkt: person.jkt,
     scope: scopeString,
     iat: now,
-    exp: now + 300,
+    exp,
   }
+  // REQUIRED when the person token carried one — a resource MUST NOT omit it.
+  if (person.mission_s256) rtPayload.mission_s256 = person.mission_s256
+  if (person.tenant) rtPayload.tenant = person.tenant
 
   const resourceToken = await signJWT(rtHeader, rtPayload, privateKey)
 
   emit(c, {
     event: 'aauth.whoami.resource_token_minted',
-    msg: 'resource_token minted for agent',
-    agent_sub: payload.sub,
-    agent_jkt: agentJkt,
+    msg: 'resource_token minted from verified person_token',
+    person_iss: identity.iss,
+    person_sub: identity.sub,
+    identity_key: identityRecordKey(identity),
+    person_token_jti: person.jti,
+    mission_s256: person.mission_s256,
+    agent_jkt: person.jkt,
     caller_jkt: callerJkt,
     granted_scope: scopeString,
     requested_scope: requestedScopes.join(' '),
-    ps_issuer: psIssuer,
+    ps_issuer: identity.iss,
   })
 
   return c.json(

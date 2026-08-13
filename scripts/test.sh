@@ -36,6 +36,9 @@ check "jwks_uri present" \
 check "scope_descriptions has whoami" \
   "$(echo "$RESOURCE_META" | jq -e '.scope_descriptions.whoami' >/dev/null 2>&1 && echo true || echo false)"
 
+check "access_mode is agent-token" \
+  "$(echo "$RESOURCE_META" | jq -e '.access_mode == "agent-token"' >/dev/null 2>&1 && echo true || echo false)"
+
 echo
 
 # ── .well-known/jwks.json ──
@@ -77,6 +80,21 @@ echo
 echo "--- GET /?scope=profile (no signature) ---"
 RESP=$(curl -sf -o /dev/null -w '%{http_code}' "$BASE/?scope=profile" || true)
 check "returns 401" "$([ "$RESP" = "401" ] && echo true || echo false)"
+
+echo
+
+# ── /openapi.json (R3 vocabulary) ──
+echo "--- /openapi.json ---"
+OPENAPI=$(curl -sf "$BASE/openapi.json")
+
+check "whoami operation is described" \
+  "$(echo "$OPENAPI" | jq -e '.paths["/"].get.operationId == "whoami"' >/dev/null 2>&1 && echo true || echo false)"
+
+# R3 annotations are sparse: whoami's one AAuth operation requires exactly the
+# resource-wide access_mode, so it annotates nothing. An annotation appearing
+# here means someone added a second mode without declaring it.
+check "no redundant x-aauth-access-mode annotation" \
+  "$(echo "$OPENAPI" | jq -e '.paths["/"].get["x-aauth-access-mode"] == null' >/dev/null 2>&1 && echo true || echo false)"
 
 echo
 
