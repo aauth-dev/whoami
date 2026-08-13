@@ -360,7 +360,7 @@ async function handleAgentToken(
   if (!cnf?.jwk) return c.json({ error: 'agent_token missing cnf.jwk' }, 400)
   const agentJkt = await computeJwkThumbprint(cnf.jwk)
 
-  const rtHeader = { alg: 'EdDSA', typ: 'aa-resource+jwt', kid: publicJwk.kid }
+  const rtHeader = { alg: 'Ed25519', typ: 'aa-resource+jwt', kid: publicJwk.kid }
   const rtPayload = {
     iss: origin,
     dwk: 'aauth-resource.json',
