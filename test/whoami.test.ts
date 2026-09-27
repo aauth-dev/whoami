@@ -460,3 +460,63 @@ describe('unknown token type', () => {
     expect(res.status).toBe(400)
   })
 })
+
+describe('the call log (@aauth/call-log)', () => {
+  const records = () => sent.filter((e) => (e as { event?: string }).event === 'aauth.call') as Array<Record<string, any>>
+  // Records are written off the request path; give them a moment.
+  const settled = async (n: number) => {
+    for (let i = 0; i < 100 && records().length < n; i++) await new Promise((r) => setTimeout(r, 10))
+    return records()
+  }
+
+  it('writes one callee record per call: the unsigned refusal, the agent-token answer, and the person-token challenge with its resource token as payload', async () => {
+    const bare = await callWhoami('/', env)
+    expect(bare.status).toBe(401)
+    await bare.text()
+    const agentJwt = await agentToken(agentServerKey, agent)
+    const served = await callWhoami('/', env, agent, agentJwt)
+    expect(served.status).toBe(200)
+    await served.json()
+    const personJwt = await personToken(psKey, agent)
+    const challenged = await callWhoami('/?scope=email', env, agent, personJwt)
+    expect(challenged.status).toBe(401)
+    await challenged.text()
+    await (await callWhoami('/.well-known/aauth-resource.json', env)).text()
+
+    const all = await settled(3)
+    expect(all).toHaveLength(3) // not the metadata
+    // Nothing in any record is a JWT — not in a body, not in the parsed challenge.
+    expect(JSON.stringify(all)).not.toMatch(/eyJ[A-Za-z0-9_-]{20,}\.eyJ/)
+    for (const r of all) expect(r).toMatchObject({ event: 'aauth.call', service: 'whoami', side: 'callee', to: RESOURCE, to_role: 'resource', method: 'GET', path: '/' })
+    const [refused, answered, challenge] = all as [Record<string, any>, Record<string, any>, Record<string, any>]
+
+    // Unsigned: no signer, a refusal (no AAuth-Requirement on whoami's 401), so level 40; a random call_id.
+    expect(refused).toMatchObject({ status: 401, level: 40, error: 'signature_required' })
+    expect(refused.from).toBeUndefined()
+    expect(refused.signed).toBeUndefined()
+    expect(refused.call_id).toMatch(/^[0-9a-f-]{36}$/)
+
+    // An agent token: the agent is named from its sub; the body is the identity answered.
+    expect(answered).toMatchObject({
+      status: 200,
+      level: 30,
+      from: AGENT_SUB,
+      from_role: 'agent',
+      agent: AGENT_SUB,
+      signed: { scheme: 'jwt', token: { type: 'aa-agent+jwt', payload: { iss: AGENT_PROVIDER, sub: AGENT_SUB } }, jkt: agent.publicJwk.kid },
+      response: { body: { iss: AGENT_PROVIDER, sub: AGENT_SUB, ps: PS } },
+    })
+    expect(answered.call_id).toMatch(/^[A-Za-z0-9_-]{43}$/)
+
+    // A person token asking for a claim: the auth-token challenge, its resource
+    // token logged as {type, payload}. A person token names no agent; its key does.
+    expect(challenge).toMatchObject({
+      status: 401,
+      level: 30,
+      query: 'scope=email',
+      signed: { scheme: 'jwt', token: { type: 'aa-person+jwt', payload: { iss: PS } }, jkt: agent.publicJwk.kid },
+      response: { params: { 'AAuth-Requirement': { requirement: 'auth-token', 'resource-token': { type: 'aa-resource+jwt', payload: { iss: RESOURCE, scope: 'whoami email' } } } } },
+    })
+    expect(challenge.from).toBeUndefined()
+  })
+})

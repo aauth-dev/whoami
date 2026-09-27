@@ -27,6 +27,7 @@ import {
   type PersonIdentity,
 } from './aauth'
 import { emit, emitVerifyFailed } from './events'
+import { callLog } from './call-log'
 import type { Env } from './types'
 
 type HonoEnv = { Bindings: Env }
@@ -68,6 +69,9 @@ app.use('*', cors({
     'Signature-Error',
   ],
 }))
+// One aauth.call record per call answered (call-log.ts), after CORS so a
+// preflight is not a call.
+app.use('*', callLog)
 
 // Identity scopes the PS can release — passed through on resource_token.scope.
 const PS_IDENTITY_SCOPES: Set<string> = new Set([
