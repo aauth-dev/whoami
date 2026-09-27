@@ -12,6 +12,7 @@
     "test:deploy": "bash scripts/test.sh"
   },
   "dependencies": {
+    "@aauth/call-log": "^0.1.0",
     "@hellocoop/httpsig": "^2.6.0",
     "hono": "^4.7.0"
   },
