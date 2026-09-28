@@ -469,7 +469,7 @@ describe('the call log (@aauth/call-log)', () => {
     return records()
   }
 
-  it('writes one callee record per call: the unsigned refusal, the agent-token answer, and the person-token challenge with its resource token as payload', async () => {
+  it('writes one callee record per call: the agent-token answer and the person-token challenge with its resource token as payload; nothing for the unsigned refusal', async () => {
     const bare = await callWhoami('/', env)
     expect(bare.status).toBe(401)
     await bare.text()
@@ -483,18 +483,15 @@ describe('the call log (@aauth/call-log)', () => {
     await challenged.text()
     await (await callWhoami('/.well-known/aauth-resource.json', env)).text()
 
-    const all = await settled(3)
-    expect(all).toHaveLength(3) // not the metadata
+    const all = await settled(2)
+    expect(all).toHaveLength(2) // not the metadata, not the unsigned refusal
     // Nothing in any record is a JWT — not in a body, not in the parsed challenge.
     expect(JSON.stringify(all)).not.toMatch(/eyJ[A-Za-z0-9_-]{20,}\.eyJ/)
     for (const r of all) expect(r).toMatchObject({ event: 'aauth.call', service: 'whoami', side: 'callee', to: RESOURCE, to_role: 'resource', method: 'GET', path: '/' })
-    const [refused, answered, challenge] = all as [Record<string, any>, Record<string, any>, Record<string, any>]
+    const [answered, challenge] = all as [Record<string, any>, Record<string, any>]
 
-    // Unsigned: no signer, a refusal (no AAuth-Requirement on whoami's 401), so level 40; a random call_id.
-    expect(refused).toMatchObject({ status: 401, level: 40, error: 'signature_required' })
-    expect(refused.from).toBeUndefined()
-    expect(refused.signed).toBeUndefined()
-    expect(refused.call_id).toMatch(/^[0-9a-f-]{36}$/)
+    // The unsigned request got 401 signature_required with no AAuth-Requirement:
+    // a browser or a scanner, not a call, so call-log 0.1.2 writes nothing for it.
 
     // An agent token: the agent is named from its sub; the body is the identity answered.
     expect(answered).toMatchObject({
