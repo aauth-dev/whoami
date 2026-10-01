@@ -479,7 +479,7 @@ async function handlePersonToken(
   // expire after the mission's `expires_at` — but a resource only ever sees
   // `mission_s256`, a hash, and has no endpoint that turns it back into an
   // expiry. The real clamp lives at the PS, which holds the approved mission
-  // and re-checks it when it resolves `person_token_jti`. Do not "fix" this
+  // and re-checks it when it resolves `presented_jti`. Do not "fix" this
   // by trying to read an expiry the resource cannot have.
   const exp = Math.min(now + RESOURCE_TOKEN_LIFETIME, person.exp)
 
@@ -489,13 +489,17 @@ async function handlePersonToken(
     dwk: DWK.resource,
     aud: identity.iss,
     jti: generateJTI(),
-    // ps, sub and person_token_jti are copied from the person token this
+    // ps, sub and presented_jti are copied from the person token this
     // resource verified. There is no agent claim in -11 — agent_jkt binds the
     // token to the agent's key, and the PS learns the agent's identity from
     // the agent token that signs the token request.
     ps: identity.iss,
     sub: identity.sub,
-    person_token_jti: person.jti,
+    // `presented_jti` is the -11 name (spec issue #95) and REQUIRED;
+    // `person_token_jti` is its pre-rename alias, kept until every PS reads
+    // the new name.
+    presented_jti: person.jti,
+    person_token_jti: person.jti, // deprecated alias of presented_jti
     agent_jkt: person.jkt,
     scope: scopeString,
     iat: now,
@@ -513,7 +517,7 @@ async function handlePersonToken(
     person_iss: identity.iss,
     person_sub: identity.sub,
     identity_key: identityRecordKey(identity),
-    person_token_jti: person.jti,
+    presented_jti: person.jti,
     mission_s256: person.mission_s256,
     agent_jkt: person.jkt,
     caller_jkt: callerJkt,
