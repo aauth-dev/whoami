@@ -39,7 +39,7 @@ The resource verifies the person token: `typ`, `dwk: aauth-person.json`, the PS'
 
 With no `?scope=`, the verified token is the answer: the resource returns the person's directed identity, `iss` and `sub`.
 
-With `?scope=`, it mints a short-lived `resource_token` (`aa-resource+jwt`) audienced to the PS that issued the person token. The token copies `ps`, `sub` and `person_token_jti` from that person token, carries `agent_jkt` and `mission_s256` when the person token had one, and expires within five minutes and never after the person token does. The response is `401` with `AAuth-Requirement: requirement=auth-token; resource-token="..."`. The agent takes it to its PS and exchanges it for an `auth_token`.
+With `?scope=`, it mints a short-lived `resource_token` (`aa-resource+jwt`) audienced to the PS that issued the person token. The token copies `ps`, `sub` and `presented_jti` (also emitted under its pre-rename alias `person_token_jti`) from that person token, carries `agent_jkt` and `mission_s256` when the person token had one, and expires within five minutes and never after the person token does. The response is `401` with `AAuth-Requirement: requirement=auth-token; resource-token="..."`. The agent takes it to its PS and exchanges it for an `auth_token`.
 
 ### 4. `aa-auth+jwt` — agent returning with claims
 
@@ -57,7 +57,7 @@ The agent token is the only token this resource reads that carries an agent iden
 
 ## Missions
 
-A mission reaches a resource only inside a PS-issued token, as the `mission_s256` claim; the `AAuth-Mission` header was removed in -11. When a person token carries one, the resource token copies it unchanged — omitting it is what mission stripping would look like, and the PS detects it by resolving `person_token_jti` against the token it actually issued.
+A mission reaches a resource only inside a PS-issued token, as the `mission_s256` claim; the `AAuth-Mission` header was removed in -11. When a person token carries one, the resource token copies it unchanged — omitting it is what mission stripping would look like, and the PS detects it by resolving `presented_jti` against the token it actually issued.
 
 ## Scopes
 

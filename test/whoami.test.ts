@@ -312,10 +312,11 @@ describe('person token — resource token', () => {
     expect(header.kid).toBeTruthy()
   })
 
-  it('copies ps, sub and person_token_jti from the person token', async () => {
+  it('copies ps, sub and presented_jti from the person token', async () => {
     const { payload } = await mintResourceToken()
     expect(payload.ps).toBe(PS)
     expect(payload.sub).toBe('directed-sub-for-whoami')
+    expect(payload.presented_jti).toBe('pt-1')
     expect(payload.person_token_jti).toBe('pt-1')
     expect(payload.aud).toBe(PS)
     expect(payload.iss).toBe(RESOURCE)
